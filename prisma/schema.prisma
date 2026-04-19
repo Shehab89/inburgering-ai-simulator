@@ -1,0 +1,230 @@
+// Inburgering AI Simulator - Database Schema
+// Dutch Integration Exam Simulator for KNM, A2, and B1 levels
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum Role {
+  STUDENT
+  TEACHER
+  ADMIN
+}
+
+enum SubscriptionStatus {
+  FREE
+  ACTIVE
+  CANCELLED
+  EXPIRED
+}
+
+enum ExamType {
+  KNM
+  TAAL_A2
+  TAAL_B1
+}
+
+enum Skill {
+  LEZEN       // Reading
+  LUISTEREN   // Listening
+  SCHRIJVEN   // Writing
+  SPREKEN     // Speaking
+}
+
+enum QuestionType {
+  MULTIPLE_CHOICE
+  OPEN_TEXT
+  AUDIO_RESPONSE
+  IMAGE_DESCRIPTION
+}
+
+// ============================================================
+// AUTHENTICATION MODELS (NextAuth.js)
+// ============================================================
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ============================================================
+// CORE MODELS
+// ============================================================
+
+/// User model — handles auth, profile, subscription, and school affiliation.
+/// Roles: STUDENT (default), TEACHER (manages students), ADMIN (platform-wide).
+model User {
+  id                 String             @id @default(cuid())
+  name               String?
+  email              String             @unique
+  emailVerified      DateTime?
+  image              String?
+  hashedPassword     String?
+  role               Role               @default(STUDENT)
+  subscriptionStatus SubscriptionStatus @default(FREE)
+  subscriptionExpiry DateTime?
+
+  // B2B: school affiliation
+  schoolId String?
+  school   School? @relation(fields: [schoolId], references: [id])
+
+  // Relations
+  accounts     Account[]
+  sessions     Session[]
+  attempts     UserAttempt[]
+  examSessions ExamSession[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([email])
+  @@index([schoolId])
+}
+
+/// School model — B2B tenant for language schools.
+/// Schools can have multiple users (students + teachers).
+model School {
+  id           String  @id @default(cuid())
+  name         String
+  contactEmail String?
+  logoUrl      String?
+
+  // Relations
+  users User[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// QuestionBank — stores all exam questions across KNM, A2, and B1.
+/// 
+/// KNM: Multiple-choice only, `skill` is null, written in A2-level Dutch.
+/// Taal A2/B1: Covers 4 skills (Lezen, Luisteren, Schrijven, Spreken).
+///
+/// `options` stores a JSON array for multiple-choice answers, e.g.:
+///   ["Amsterdam", "Den Haag", "Rotterdam", "Utrecht"]
+///
+/// `mediaUrl` can point to an image (for IMAGE_DESCRIPTION) or audio (for LUISTEREN).
+/// `correctAnswer` is null for open-ended questions (graded by AI).
+model QuestionBank {
+  id           String       @id @default(cuid())
+  examType     ExamType
+  skill        Skill?       // null for KNM (not skill-based)
+  questionType QuestionType
+
+  questionText  String  @db.Text
+  options       Json?   // JSON array for multiple-choice options
+  correctAnswer String? // null for open-ended/audio responses (AI-graded)
+  mediaUrl      String? // URL to image or audio file
+  explanation   String? @db.Text // Explanation shown after answering
+
+  difficulty Int     @default(1) // 1-5 difficulty scale
+  isActive   Boolean @default(true) // Soft delete / disable questions
+
+  // Relations
+  attempts UserAttempt[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([examType, skill])
+  @@index([questionType])
+  @@index([isActive])
+}
+
+/// ExamSession — groups multiple UserAttempts into a single exam sitting.
+/// Tracks overall score, timing, and completion status.
+model ExamSession {
+  id             String   @id @default(cuid())
+  userId         String
+  examType       ExamType
+  skill          Skill?   // null for KNM
+  totalScore     Float?   // Calculated after completion
+  totalQuestions Int      @default(0)
+  startedAt      DateTime @default(now())
+  completedAt    DateTime? // null until exam is submitted
+
+  // Relations
+  user     User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  attempts UserAttempt[]
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([examType])
+}
+
+/// UserAttempt — records a single answer to a single question.
+/// Stores both the user's response and AI evaluation results.
+///
+/// For text answers: `userAnswer` contains the response.
+/// For audio answers: `userAudioUrl` points to the uploaded audio file.
+/// AI evaluation: `aiScore` (0.0 - 10.0), `aiFeedback` (detailed text), `isCorrect`.
+model UserAttempt {
+  id         String @id @default(cuid())
+  userId     String
+  questionId String
+  sessionId  String?
+
+  // User's response
+  userAnswer   String? @db.Text // Text answer
+  userAudioUrl String?          // URL to uploaded audio (for Spreken)
+
+  // AI evaluation results
+  isCorrect  Boolean? // null until graded
+  aiScore    Float?   // 0.0 - 10.0 scale
+  aiFeedback String?  @db.Text // Detailed AI feedback
+
+  // Metadata
+  timeTakenSecs Int? // Time spent on this question
+
+  // Relations
+  user     User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  question QuestionBank  @relation(fields: [questionId], references: [id])
+  session  ExamSession?  @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([questionId])
+  @@index([sessionId])
+}
